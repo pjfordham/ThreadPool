@@ -167,7 +167,7 @@ inline void ThreadPool::wait_until_nothing_in_flight()
 {
     std::unique_lock<std::mutex> lock(this->in_flight_mutex);
     this->condition.wait(lock,
-        [this]{ return this->in_flight != 0; });
+        [this]{ return this->in_flight == 0; });
 }
 
 } // namespace progschj
