@@ -24,6 +24,7 @@ int main()
     }
 
     pool.wait_until_empty();
+    pool.wait_until_nothing_in_flight ();
 
     for(auto && result: results)
         std::cout << result.get() << ' ';

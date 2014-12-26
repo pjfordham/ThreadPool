@@ -1,3 +1,4 @@
+// -*- C++ -*-
 // Copyright (c) 2012 Jakob Progsch
 //
 // This software is provided 'as-is', without any express or implied
@@ -31,6 +32,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <future>
+#include <atomic>
 #include <functional>
 #include <stdexcept>
 
@@ -39,13 +41,15 @@ namespace progschj {
 
 class ThreadPool {
 public:
-    explicit ThreadPool(size_t threads
+    explicit ThreadPool(std::size_t threads
         = std::max(2u, std::thread::hardware_concurrency() * 2));
     template<class F, class... Args>
     auto enqueue(F&& f, Args&&... args)
         -> std::future<typename std::result_of<F(Args...)>::type>;
     void wait_until_empty();
+    void wait_until_nothing_in_flight();
     ~ThreadPool();
+
 private:
     // need to keep track of threads so we can join them
     std::vector< std::thread > workers;
@@ -56,11 +60,39 @@ private:
     std::mutex queue_mutex;
     std::condition_variable condition;
     bool stop;
+
+    std::mutex in_flight_mutex;
+    std::condition_variable in_flight_condition;
+    std::atomic<std::size_t> in_flight;
+
+    struct handle_in_flight
+    {
+        ThreadPool & tp;
+
+        handle_in_flight(ThreadPool & tp_)
+            : tp(tp_)
+        {
+            std::atomic_fetch_add_explicit(&tp.in_flight,
+                std::size_t(1),
+                std::memory_order_relaxed);
+        }
+
+        ~handle_in_flight()
+        {
+            std::size_t prev
+                = std::atomic_fetch_sub_explicit(&tp.in_flight,
+                    std::size_t(1),
+                    std::memory_order_consume);
+            if (prev == 1)
+                tp.in_flight_condition.notify_all();
+        }
+    };
 };
 
 // the constructor just launches some amount of workers
-inline ThreadPool::ThreadPool(size_t threads)
-    :   stop(false)
+inline ThreadPool::ThreadPool(std::size_t threads)
+    : stop(false)
+    , in_flight(0)
 {
     for(size_t i = 0;i<threads;++i)
         workers.emplace_back(
@@ -80,6 +112,7 @@ inline ThreadPool::ThreadPool(size_t threads)
                         this->tasks.pop();
                     }
 
+                    handle_in_flight guard(*this);
                     task();
                 }
             }
@@ -128,6 +161,13 @@ inline void ThreadPool::wait_until_empty()
     std::unique_lock<std::mutex> lock(this->queue_mutex);
     this->condition.wait(lock,
         [this]{ return !this->tasks.empty(); });
+}
+
+inline void ThreadPool::wait_until_nothing_in_flight()
+{
+    std::unique_lock<std::mutex> lock(this->in_flight_mutex);
+    this->condition.wait(lock,
+        [this]{ return this->in_flight != 0; });
 }
 
 } // namespace progschj
