@@ -114,10 +114,11 @@ inline ThreadPool::ThreadPool(std::size_t threads)
                         empty = this->tasks.empty();
                     }
 
+                    handle_in_flight guard(*this);
+
                     if (empty)
                         condition.notify_all ();
 
-                    handle_in_flight guard(*this);
                     task();
                 }
             }
