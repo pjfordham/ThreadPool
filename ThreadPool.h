@@ -101,6 +101,7 @@ inline ThreadPool::ThreadPool(std::size_t threads)
                 for(;;)
                 {
                     std::function<void()> task;
+                    bool empty;
 
                     {
                         std::unique_lock<std::mutex> lock(this->queue_mutex);
@@ -110,7 +111,11 @@ inline ThreadPool::ThreadPool(std::size_t threads)
                             return;
                         task = std::move(this->tasks.front());
                         this->tasks.pop();
+                        empty = this->tasks.empty();
                     }
+
+                    if (empty)
+                        condition.notify_all ();
 
                     handle_in_flight guard(*this);
                     task();
@@ -160,13 +165,13 @@ inline void ThreadPool::wait_until_empty()
 {
     std::unique_lock<std::mutex> lock(this->queue_mutex);
     this->condition.wait(lock,
-        [this]{ return !this->tasks.empty(); });
+        [this]{ return this->tasks.empty(); });
 }
 
 inline void ThreadPool::wait_until_nothing_in_flight()
 {
     std::unique_lock<std::mutex> lock(this->in_flight_mutex);
-    this->condition.wait(lock,
+    this->in_flight_condition.wait(lock,
         [this]{ return this->in_flight == 0; });
 }
 
