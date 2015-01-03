@@ -1,5 +1,5 @@
 // -*- C++ -*-
-// Copyright (c) 2012 Jakob Progsch
+// Copyright (c) 2012-2015 Jakob Progsch
 //
 // This software is provided 'as-is', without any express or implied
 // warranty. In no event will the authors be held liable for any damages
@@ -20,7 +20,7 @@
 //    3. This notice may not be removed or altered from any source
 //    distribution.
 //
-// Modified for log4cplus, (c) 2014 Václav Zeman.
+// Modified for log4cplus, copyright (c) 2014-2015 Václav Zeman.
 
 #ifndef THREAD_POOL_H_7ea1ee6b_4f17_4c09_b76b_3d44e102400c
 #define THREAD_POOL_H_7ea1ee6b_4f17_4c09_b76b_3d44e102400c
