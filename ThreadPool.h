@@ -35,6 +35,7 @@
 #include <atomic>
 #include <functional>
 #include <stdexcept>
+#include <algorithm>
 
 
 namespace progschj {
