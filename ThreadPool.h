@@ -64,7 +64,8 @@ private:
 
     // synchronization
     std::mutex queue_mutex;
-    std::condition_variable condition;
+    std::condition_variable condition_producers;
+    std::condition_variable condition_consumers;
 
     std::mutex in_flight_mutex;
     std::condition_variable in_flight_condition;
@@ -105,22 +106,24 @@ inline ThreadPool::ThreadPool(std::size_t threads)
                 for(;;)
                 {
                     std::function<void()> task;
-                    bool empty;
+                    bool notify;
 
                     {
                         std::unique_lock<std::mutex> lock(this->queue_mutex);
-                        this->condition.wait(lock,
+                        this->condition_consumers.wait(lock,
                             [this]{ return this->stop || !this->tasks.empty(); });
                         if(this->stop && this->tasks.empty())
                             return;
                         task = std::move(this->tasks.front());
                         this->tasks.pop();
-                        empty = this->tasks.empty();
+                        notify = this->tasks.size() + 1 ==  max_queue_size
+                            || this->tasks.empty();
                     }
 
                     handle_in_flight guard(*this);
 
-                    condition.notify_all ();
+                    if (notify)
+                        condition_producers.notify_all ();
 
                     task();
                 }
@@ -144,7 +147,7 @@ auto ThreadPool::enqueue(F&& f, Args&&... args)
         std::unique_lock<std::mutex> lock(queue_mutex);
         if (tasks.size () >= max_queue_size)
             // wait for the queue to empty or be stopped
-            condition.wait(lock, [this]{
+            condition_producers.wait(lock, [this]{
                 return tasks.size () < max_queue_size
                     || stop; });
 
@@ -154,7 +157,7 @@ auto ThreadPool::enqueue(F&& f, Args&&... args)
 
         tasks.emplace([task](){ (*task)(); });
     }
-    condition.notify_one();
+    condition_consumers.notify_one();
     return res;
 }
 
@@ -165,7 +168,7 @@ inline ThreadPool::~ThreadPool()
         std::unique_lock<std::mutex> lock(queue_mutex);
         stop = true;
     }
-    condition.notify_all();
+    condition_consumers.notify_all();
     for(std::thread &worker: workers)
         worker.join();
 }
@@ -173,7 +176,7 @@ inline ThreadPool::~ThreadPool()
 inline void ThreadPool::wait_until_empty()
 {
     std::unique_lock<std::mutex> lock(this->queue_mutex);
-    this->condition.wait(lock,
+    this->condition_producers.wait(lock,
         [this]{ return this->tasks.empty(); });
 }
 
@@ -194,7 +197,7 @@ inline void ThreadPool::set_queue_size_limit(std::size_t limit)
         notify = old_limit < max_queue_size;
     }
     if (notify)
-        condition.notify_all();
+        condition_producers.notify_all();
 }
 
 } // namespace progschj
