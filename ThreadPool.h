@@ -48,6 +48,7 @@ public:
         -> std::future<typename std::result_of<F(Args...)>::type>;
     void wait_until_empty();
     void wait_until_nothing_in_flight();
+    void set_queue_size_limit(std::size_t limit);
     ~ThreadPool();
 
 private:
@@ -55,11 +56,14 @@ private:
     std::vector< std::thread > workers;
     // the task queue
     std::queue< std::function<void()> > tasks;
+    // queue length limit
+    std::size_t max_queue_size = 100000;
+    // stop signal
+    bool stop = false;
 
     // synchronization
     std::mutex queue_mutex;
     std::condition_variable condition;
-    bool stop;
 
     std::mutex in_flight_mutex;
     std::condition_variable in_flight_condition;
@@ -91,8 +95,7 @@ private:
 
 // the constructor just launches some amount of workers
 inline ThreadPool::ThreadPool(std::size_t threads)
-    : stop(false)
-    , in_flight(0)
+    : in_flight(0)
 {
     for(size_t i = 0;i<threads;++i)
         workers.emplace_back(
@@ -116,8 +119,7 @@ inline ThreadPool::ThreadPool(std::size_t threads)
 
                     handle_in_flight guard(*this);
 
-                    if (empty)
-                        condition.notify_all ();
+                    condition.notify_all ();
 
                     task();
                 }
@@ -139,6 +141,11 @@ auto ThreadPool::enqueue(F&& f, Args&&... args)
     std::future<return_type> res = task->get_future();
     {
         std::unique_lock<std::mutex> lock(queue_mutex);
+        if (tasks.size () >= max_queue_size)
+            // wait for the queue to empty or be stopped
+            condition.wait(lock, [this]{
+                return tasks.size () < max_queue_size
+                    || stop; });
 
         // don't allow enqueueing after stopping the pool
         if(stop)
@@ -174,6 +181,19 @@ inline void ThreadPool::wait_until_nothing_in_flight()
     std::unique_lock<std::mutex> lock(this->in_flight_mutex);
     this->in_flight_condition.wait(lock,
         [this]{ return this->in_flight == 0; });
+}
+
+inline void ThreadPool::set_queue_size_limit(std::size_t limit)
+{
+    bool notify;
+    {
+        std::unique_lock<std::mutex> lock(this->queue_mutex);
+        std::size_t const old_limit = max_queue_size;
+        max_queue_size = std::max(limit, std::size_t(1));
+        notify = old_limit < max_queue_size;
+    }
+    if (notify)
+        condition.notify_all();
 }
 
 } // namespace progschj
