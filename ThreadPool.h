@@ -71,19 +71,15 @@ private:
     std::condition_variable in_flight_condition;
     std::atomic<std::size_t> in_flight;
 
-    struct handle_in_flight
+    struct handle_in_flight_decrement
     {
         ThreadPool & tp;
 
-        handle_in_flight(ThreadPool & tp_)
+        handle_in_flight_decrement(ThreadPool & tp_)
             : tp(tp_)
-        {
-            std::atomic_fetch_add_explicit(&tp.in_flight,
-                std::size_t(1),
-                std::memory_order_relaxed);
-        }
+        { }
 
-        ~handle_in_flight()
+        ~handle_in_flight_decrement()
         {
             std::size_t prev
                 = std::atomic_fetch_sub_explicit(&tp.in_flight,
@@ -120,7 +116,7 @@ inline ThreadPool::ThreadPool(std::size_t threads)
                             || this->tasks.empty();
                     }
 
-                    handle_in_flight guard(*this);
+                    handle_in_flight_decrement guard(*this);
 
                     if (notify)
                         condition_producers.notify_all ();
@@ -156,6 +152,9 @@ auto ThreadPool::enqueue(F&& f, Args&&... args)
             throw std::runtime_error("enqueue on stopped ThreadPool");
 
         tasks.emplace([task](){ (*task)(); });
+        std::atomic_fetch_add_explicit(&in_flight,
+            std::size_t(1),
+            std::memory_order_relaxed);
     }
     condition_consumers.notify_one();
     return res;
