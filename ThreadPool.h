@@ -86,7 +86,10 @@ private:
                     std::size_t(1),
                     std::memory_order_consume);
             if (prev == 1)
+            {
+                std::unique_lock<std::mutex> guard(tp.in_flight_mutex);
                 tp.in_flight_condition.notify_all();
+            }
         }
     };
 };
@@ -119,7 +122,10 @@ inline ThreadPool::ThreadPool(std::size_t threads)
                     handle_in_flight_decrement guard(*this);
 
                     if (notify)
-                        condition_producers.notify_all ();
+                    {
+                        std::unique_lock<std::mutex> lock(this->queue_mutex);
+                        condition_producers.notify_all();
+                    }
 
                     task();
                 }
@@ -139,24 +145,27 @@ auto ThreadPool::enqueue(F&& f, Args&&... args)
         );
 
     std::future<return_type> res = task->get_future();
-    {
-        std::unique_lock<std::mutex> lock(queue_mutex);
-        if (tasks.size () >= max_queue_size)
-            // wait for the queue to empty or be stopped
-            condition_producers.wait(lock, [this]{
+
+    std::unique_lock<std::mutex> lock(queue_mutex);
+    if (tasks.size () >= max_queue_size)
+        // wait for the queue to empty or be stopped
+        condition_producers.wait(lock,
+            [this]
+            {
                 return tasks.size () < max_queue_size
-                    || stop; });
+                    || stop;
+            });
 
-        // don't allow enqueueing after stopping the pool
-        if(stop)
-            throw std::runtime_error("enqueue on stopped ThreadPool");
+    // don't allow enqueueing after stopping the pool
+    if (stop)
+        throw std::runtime_error("enqueue on stopped ThreadPool");
 
-        tasks.emplace([task](){ (*task)(); });
-        std::atomic_fetch_add_explicit(&in_flight,
-            std::size_t(1),
-            std::memory_order_relaxed);
-    }
+    tasks.emplace([task](){ (*task)(); });
+    std::atomic_fetch_add_explicit(&in_flight,
+        std::size_t(1),
+        std::memory_order_relaxed);
     condition_consumers.notify_one();
+
     return res;
 }
 
@@ -166,8 +175,8 @@ inline ThreadPool::~ThreadPool()
     {
         std::unique_lock<std::mutex> lock(queue_mutex);
         stop = true;
+        condition_consumers.notify_all();
     }
-    condition_consumers.notify_all();
     for(std::thread &worker: workers)
         worker.join();
 }
@@ -188,14 +197,10 @@ inline void ThreadPool::wait_until_nothing_in_flight()
 
 inline void ThreadPool::set_queue_size_limit(std::size_t limit)
 {
-    bool notify;
-    {
-        std::unique_lock<std::mutex> lock(this->queue_mutex);
-        std::size_t const old_limit = max_queue_size;
-        max_queue_size = (std::max)(limit, std::size_t(1));
-        notify = old_limit < max_queue_size;
-    }
-    if (notify)
+    std::unique_lock<std::mutex> lock(this->queue_mutex);
+    std::size_t const old_limit = max_queue_size;
+    max_queue_size = (std::max)(limit, std::size_t(1));
+    if (old_limit < max_queue_size)
         condition_producers.notify_all();
 }
 
