@@ -36,6 +36,7 @@
 #include <functional>
 #include <stdexcept>
 #include <algorithm>
+#include <cassert>
 
 
 namespace progschj {
@@ -84,7 +85,7 @@ private:
             std::size_t prev
                 = std::atomic_fetch_sub_explicit(&tp.in_flight,
                     std::size_t(1),
-                    std::memory_order_consume);
+                    std::memory_order_acq_rel);
             if (prev == 1)
             {
                 std::unique_lock<std::mutex> guard(tp.in_flight_mutex);
@@ -163,11 +164,12 @@ auto ThreadPool::enqueue(F&& f, Args&&... args)
     tasks.emplace([task](){ (*task)(); });
     std::atomic_fetch_add_explicit(&in_flight,
         std::size_t(1),
-        std::memory_order_relaxed);
+        std::memory_order_acq_rel);
     condition_consumers.notify_one();
 
     return res;
 }
+
 
 // the destructor joins all threads
 inline ThreadPool::~ThreadPool()
@@ -176,9 +178,13 @@ inline ThreadPool::~ThreadPool()
         std::unique_lock<std::mutex> lock(queue_mutex);
         stop = true;
         condition_consumers.notify_all();
+        condition_producers.notify_all();
     }
+
     for(std::thread &worker: workers)
         worker.join();
+
+    assert(in_flight == 0);
 }
 
 inline void ThreadPool::wait_until_empty()
