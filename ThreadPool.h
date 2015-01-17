@@ -164,7 +164,7 @@ auto ThreadPool::enqueue(F&& f, Args&&... args)
     tasks.emplace([task](){ (*task)(); });
     std::atomic_fetch_add_explicit(&in_flight,
         std::size_t(1),
-        std::memory_order_acq_rel);
+        std::memory_order_relaxed);
     condition_consumers.notify_one();
 
     return res;
