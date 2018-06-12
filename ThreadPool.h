@@ -51,11 +51,16 @@ public:
     void wait_until_empty();
     void wait_until_nothing_in_flight();
     void set_queue_size_limit(std::size_t limit);
+    void set_pool_size(std::size_t limit);
     ~ThreadPool();
 
 private:
+    void emplace_back_worker (std::size_t worker_number);
+
     // need to keep track of threads so we can join them
     std::vector< std::thread > workers;
+    // target pool size
+    std::size_t pool_size;
     // the task queue
     std::queue< std::function<void()> > tasks;
     // queue length limit
@@ -97,41 +102,11 @@ private:
 
 // the constructor just launches some amount of workers
 inline ThreadPool::ThreadPool(std::size_t threads)
-    : in_flight(0)
+    : pool_size(threads)
+    , in_flight(0)
 {
-    for(size_t i = 0;i<threads;++i)
-        workers.emplace_back(
-            [this]
-            {
-                for(;;)
-                {
-                    std::function<void()> task;
-                    bool notify;
-
-                    {
-                        std::unique_lock<std::mutex> lock(this->queue_mutex);
-                        this->condition_consumers.wait(lock,
-                            [this]{ return this->stop || !this->tasks.empty(); });
-                        if(this->stop && this->tasks.empty())
-                            return;
-                        task = std::move(this->tasks.front());
-                        this->tasks.pop();
-                        notify = this->tasks.size() + 1 ==  max_queue_size
-                            || this->tasks.empty();
-                    }
-
-                    handle_in_flight_decrement guard(*this);
-
-                    if (notify)
-                    {
-                        std::unique_lock<std::mutex> lock(this->queue_mutex);
-                        condition_producers.notify_all();
-                    }
-
-                    task();
-                }
-            }
-        );
+    for (std::size_t i = 0; i != threads; ++i)
+        emplace_back_worker(i);
 }
 
 // add new work item to the pool
@@ -174,16 +149,12 @@ auto ThreadPool::enqueue(F&& f, Args&&... args)
 // the destructor joins all threads
 inline ThreadPool::~ThreadPool()
 {
-    {
-        std::unique_lock<std::mutex> lock(queue_mutex);
-        stop = true;
-        condition_consumers.notify_all();
-        condition_producers.notify_all();
-    }
-
-    for(std::thread &worker: workers)
-        worker.join();
-
+    std::unique_lock<std::mutex> lock(queue_mutex);
+    stop = true;
+    condition_consumers.notify_all();
+    condition_producers.notify_all();
+    pool_size = 0;
+    condition_consumers.wait(lock, [this]{ return this->workers.empty(); });
     assert(in_flight == 0);
 }
 
@@ -204,10 +175,97 @@ inline void ThreadPool::wait_until_nothing_in_flight()
 inline void ThreadPool::set_queue_size_limit(std::size_t limit)
 {
     std::unique_lock<std::mutex> lock(this->queue_mutex);
+
+    if (stop)
+        return;
+
     std::size_t const old_limit = max_queue_size;
     max_queue_size = (std::max)(limit, std::size_t(1));
     if (old_limit < max_queue_size)
         condition_producers.notify_all();
+}
+
+inline void ThreadPool::set_pool_size(std::size_t limit)
+{
+    if (limit < 1)
+        limit = 1;
+
+    std::unique_lock<std::mutex> lock(this->queue_mutex);
+
+    if (stop)
+        return;
+
+    pool_size = limit;
+    std::size_t const old_size = this->workers.size();
+    if (pool_size > old_size)
+    {
+        // create new worker threads
+        for (std::size_t i = old_size; i != pool_size; ++i)
+            emplace_back_worker(i);
+    }
+    else if (pool_size < old_size)
+        // notify all worker threads to start downsizing
+        this->condition_consumers.notify_all();
+}
+
+inline void ThreadPool::emplace_back_worker (std::size_t worker_number)
+{
+    workers.emplace_back(
+        [this, worker_number]
+        {
+            for(;;)
+            {
+                std::function<void()> task;
+                bool notify;
+
+                {
+                    std::unique_lock<std::mutex> lock(this->queue_mutex);
+                    this->condition_consumers.wait(lock,
+                        [this, worker_number]{
+                            return this->stop || !this->tasks.empty()
+                                || pool_size < worker_number + 1; });
+
+                    // deal with downsizing of thread pool or shutdown
+                    if ((this->stop && this->tasks.empty())
+                        || (!this->stop && pool_size < worker_number + 1))
+                    {
+                        std::thread & last_thread = this->workers.back();
+                        std::thread::id this_id = std::this_thread::get_id();
+                        if (this_id == last_thread.get_id())
+                        {
+                            // highest number thread exits, resizes the workers
+                            // vector, and notifies others
+                            last_thread.detach();
+                            this->workers.pop_back();
+                            this->condition_consumers.notify_all();
+                            return;
+                        }
+                        else
+                            continue;
+                    }
+                    else if (!this->tasks.empty())
+                    {
+                        task = std::move(this->tasks.front());
+                        this->tasks.pop();
+                        notify = this->tasks.size() + 1 ==  max_queue_size
+                            || this->tasks.empty();
+                    }
+                    else
+                        continue;
+                }
+
+                handle_in_flight_decrement guard(*this);
+
+                if (notify)
+                {
+                    std::unique_lock<std::mutex> lock(this->queue_mutex);
+                    condition_producers.notify_all();
+                }
+
+                task();
+            }
+        }
+        );
 }
 
 } // namespace progschj
