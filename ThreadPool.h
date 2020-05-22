@@ -55,7 +55,8 @@ public:
     ~ThreadPool();
 
 private:
-    void emplace_back_worker (std::size_t worker_number);
+    void start_worker(std::size_t worker_number,
+        std::unique_lock<std::mutex> const &lock);
 
     // need to keep track of threads so we can join them
     std::vector< std::thread > workers;
@@ -105,8 +106,9 @@ inline ThreadPool::ThreadPool(std::size_t threads)
     : pool_size(threads)
     , in_flight(0)
 {
+    std::unique_lock<std::mutex> lock(this->queue_mutex);
     for (std::size_t i = 0; i != threads; ++i)
-        emplace_back_worker(i);
+        start_worker(i, lock);
 }
 
 // add new work item to the pool
@@ -151,9 +153,9 @@ inline ThreadPool::~ThreadPool()
 {
     std::unique_lock<std::mutex> lock(queue_mutex);
     stop = true;
+    pool_size = 0;
     condition_consumers.notify_all();
     condition_producers.notify_all();
-    pool_size = 0;
     condition_consumers.wait(lock, [this]{ return this->workers.empty(); });
     assert(in_flight == 0);
 }
@@ -195,22 +197,31 @@ inline void ThreadPool::set_pool_size(std::size_t limit)
     if (stop)
         return;
 
+    std::size_t const old_size = pool_size;
+    assert(this->workers.size() >= old_size);
+
     pool_size = limit;
-    std::size_t const old_size = this->workers.size();
     if (pool_size > old_size)
     {
         // create new worker threads
+        // it is possible that some of these are still running because
+        // they have not stopped yet after a pool size reduction, such
+        // workers will just keep running
         for (std::size_t i = old_size; i != pool_size; ++i)
-            emplace_back_worker(i);
+            start_worker(i, lock);
     }
     else if (pool_size < old_size)
         // notify all worker threads to start downsizing
         this->condition_consumers.notify_all();
 }
 
-inline void ThreadPool::emplace_back_worker (std::size_t worker_number)
+inline void ThreadPool::start_worker(
+    std::size_t worker_number, std::unique_lock<std::mutex> const &lock)
 {
-    workers.emplace_back(
+    assert(lock.owns_lock() && lock.mutex() == &this->queue_mutex);
+    assert(worker_number <= this->workers.size());
+
+    auto worker_func =
         [this, worker_number]
         {
             for(;;)
@@ -229,19 +240,16 @@ inline void ThreadPool::emplace_back_worker (std::size_t worker_number)
                     if ((this->stop && this->tasks.empty())
                         || (!this->stop && pool_size < worker_number + 1))
                     {
-                        std::thread & last_thread = this->workers.back();
-                        std::thread::id this_id = std::this_thread::get_id();
-                        if (this_id == last_thread.get_id())
-                        {
-                            // highest number thread exits, resizes the workers
-                            // vector, and notifies others
-                            last_thread.detach();
+                        // detach this worker, effectively marking it stopped
+                        this->workers[worker_number].detach();
+                        // downsize the workers vector as much as possible
+                        while (this->workers.size() > pool_size
+                             && !this->workers.back().joinable())
                             this->workers.pop_back();
+                        // if this is was last worker, notify the destructor
+                        if (this->workers.empty())
                             this->condition_consumers.notify_all();
-                            return;
-                        }
-                        else
-                            continue;
+                        return;
                     }
                     else if (!this->tasks.empty())
                     {
@@ -264,8 +272,16 @@ inline void ThreadPool::emplace_back_worker (std::size_t worker_number)
 
                 task();
             }
+        };
+
+    if (worker_number < this->workers.size()) {
+        std::thread & worker = this->workers[worker_number];
+        // start only if not already running
+        if (!worker.joinable()) {
+            worker = std::thread(worker_func);
         }
-        );
+    } else
+        this->workers.push_back(std::thread(worker_func));
 }
 
 } // namespace progschj
