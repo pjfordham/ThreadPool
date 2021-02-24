@@ -48,7 +48,7 @@ public:
     template<class F, class... Args>
     auto enqueue(F&& f, Args&&... args)
         -> std::future<
-#if __cplusplus >= 202002L
+#if defined(__cpp_lib_is_invocable) && __cpp_lib_is_invocable >= 201703
             typename std::invoke_result<F&&, Args&&...>::type
 #else
             typename std::result_of<F&& (Args&&...)>::type
@@ -121,14 +121,14 @@ inline ThreadPool::ThreadPool(std::size_t threads)
 template<class F, class... Args>
 auto ThreadPool::enqueue(F&& f, Args&&... args)
     -> std::future<
-#if __cplusplus >= 202002L
+#if defined(__cpp_lib_is_invocable) && __cpp_lib_is_invocable >= 201703
       typename std::invoke_result<F&&, Args&&...>::type
 #else
       typename std::result_of<F&& (Args&&...)>::type
 #endif
       >
 {
-#if __cplusplus >= 202002L
+#if defined(__cpp_lib_is_invocable) && __cpp_lib_is_invocable >= 201703
     using return_type = typename std::invoke_result<F&&, Args&&...>::type;
 #else
     using return_type = typename std::result_of<F&& (Args&&...)>::type;
