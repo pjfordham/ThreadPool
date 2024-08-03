@@ -41,19 +41,29 @@
 
 namespace progschj {
 
+class would_block
+    : public std::runtime_error
+{
+    using std::runtime_error::runtime_error;
+};
+
+
 class ThreadPool {
 public:
+    template <typename F, typename... Args>
+    using return_type =
+#if defined(__cpp_lib_is_invocable) && __cpp_lib_is_invocable >= 201703L
+            typename std::invoke_result<F&&, Args&&...>::type;
+#else
+            typename std::result_of<F&& (Args&&...)>::type;
+#endif
+
     explicit ThreadPool(std::size_t threads
         = (std::max)(2u, std::thread::hardware_concurrency()));
-    template<class F, class... Args>
-    auto enqueue(F&& f, Args&&... args)
-        -> std::future<
-#if defined(__cpp_lib_is_invocable) && __cpp_lib_is_invocable >= 201703
-            typename std::invoke_result<F&&, Args&&...>::type
-#else
-            typename std::result_of<F&& (Args&&...)>::type
-#endif
-    >;
+    template <typename F, typename... Args>
+    auto enqueue_block(F&& f, Args&&... args) -> std::future<return_type<F, Args...>>;
+    template <typename F, typename... Args>
+    auto enqueue(F&& f, Args&&... args) -> std::future<return_type<F, Args...>>;
     void wait_until_empty();
     void wait_until_nothing_in_flight();
     void set_queue_size_limit(std::size_t limit);
@@ -63,6 +73,12 @@ public:
 private:
     void start_worker(std::size_t worker_number,
         std::unique_lock<std::mutex> const &lock);
+
+    template <typename F, typename... Args>
+    auto enqueue_worker(bool, F&& f, Args&&... args) -> std::future<return_type<F, Args...>>;
+
+    template <typename T>
+    static std::future<T> make_exception_future (std::exception_ptr ex_ptr);
 
     // need to keep track of threads so we can join them
     std::vector< std::thread > workers;
@@ -117,39 +133,50 @@ inline ThreadPool::ThreadPool(std::size_t threads)
         start_worker(i, lock);
 }
 
-// add new work item to the pool
+// add new work item to the pool and block if the queue is full
 template<class F, class... Args>
-auto ThreadPool::enqueue(F&& f, Args&&... args)
-    -> std::future<
-#if defined(__cpp_lib_is_invocable) && __cpp_lib_is_invocable >= 201703
-      typename std::invoke_result<F&&, Args&&...>::type
-#else
-      typename std::result_of<F&& (Args&&...)>::type
-#endif
-      >
+auto ThreadPool::enqueue_block(F&& f, Args&&... args) -> std::future<return_type<F, Args...>>
 {
-#if defined(__cpp_lib_is_invocable) && __cpp_lib_is_invocable >= 201703
-    using return_type = typename std::invoke_result<F&&, Args&&...>::type;
-#else
-    using return_type = typename std::result_of<F&& (Args&&...)>::type;
-#endif
+    return enqueue_worker (true, std::forward<F> (f), std::forward<Args> (args)...);
+}
 
+// add new work item to the pool and return future with would_block exception if it is full
+template<class F, class... Args>
+auto ThreadPool::enqueue(F&& f, Args&&... args) -> std::future<return_type<F, Args...>>
+{
+    return enqueue_worker (false, std::forward<F> (f), std::forward<Args> (args)...);
+}
 
-    auto task = std::make_shared< std::packaged_task<return_type()> >(
+template <typename F, typename... Args>
+auto ThreadPool::enqueue_worker(bool block, F&& f, Args&&... args) -> std::future<return_type<F, Args...>>
+{
+    auto task = std::make_shared< std::packaged_task<return_type<F, Args...>()> >(
             std::bind(std::forward<F>(f), std::forward<Args>(args)...)
         );
 
-    std::future<return_type> res = task->get_future();
+    std::future<return_type<F, Args...>> res = task->get_future();
 
     std::unique_lock<std::mutex> lock(queue_mutex);
+
     if (tasks.size () >= max_queue_size)
-        // wait for the queue to empty or be stopped
-        condition_producers.wait(lock,
-            [this]
-            {
-                return tasks.size () < max_queue_size
-                    || stop;
-            });
+    {
+        if (block)
+        {
+            // wait for the queue to empty or be stopped
+            condition_producers.wait(lock,
+                [this]
+                {
+                    return tasks.size () < max_queue_size
+                        || stop;
+                });
+        }
+        else
+        {
+            return ThreadPool::make_exception_future<return_type<F, Args...>> (
+                std::make_exception_ptr (would_block("queue full")));
+        }
+    }
+
 
     // don't allow enqueueing after stopping the pool
     if (stop)
@@ -163,7 +190,6 @@ auto ThreadPool::enqueue(F&& f, Args&&... args)
 
     return res;
 }
-
 
 // the destructor joins all threads
 inline ThreadPool::~ThreadPool()
@@ -299,6 +325,14 @@ inline void ThreadPool::start_worker(
         }
     } else
         this->workers.push_back(std::thread(worker_func));
+}
+
+template <typename T>
+inline std::future<T> ThreadPool::make_exception_future (std::exception_ptr ex_ptr)
+{
+    std::promise<T> p;
+    p.set_exception (ex_ptr);
+    return p.get_future ();
 }
 
 } // namespace progschj
