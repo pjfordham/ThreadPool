@@ -68,6 +68,7 @@ public:
     void wait_until_nothing_in_flight();
     void set_queue_size_limit(std::size_t limit);
     void set_pool_size(std::size_t limit);
+    void shutdown();
     ~ThreadPool();
 
 private:
@@ -192,7 +193,7 @@ auto ThreadPool::enqueue_worker(bool block, F&& f, Args&&... args) -> std::futur
 }
 
 // the destructor joins all threads
-inline ThreadPool::~ThreadPool()
+inline void ThreadPool::shutdown()
 {
     std::unique_lock<std::mutex> lock(queue_mutex);
     stop = true;
@@ -201,6 +202,12 @@ inline ThreadPool::~ThreadPool()
     condition_producers.notify_all();
     condition_consumers.wait(lock, [this]{ return this->workers.empty(); });
     assert(in_flight == 0);
+}
+
+// the destructor joins all threads
+inline ThreadPool::~ThreadPool()
+{
+
 }
 
 inline void ThreadPool::wait_until_empty()
